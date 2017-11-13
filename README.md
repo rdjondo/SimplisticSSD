@@ -1,2 +1,2 @@
-# SimplisticSSD
-Ultra simple Single Shot detector implementation
+# SSimplisticSegNet
+SimplisticSegNet implementation on Keras
