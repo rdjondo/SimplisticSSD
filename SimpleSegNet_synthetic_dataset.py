@@ -29,7 +29,7 @@ import glob
 import random
 
 
-# In[55]:
+# In[2]:
 
 
 class TrainingImage:
@@ -109,20 +109,18 @@ trainim.addRandRectangle(TrainingImage.WHITE_CLASS)
 # Plot background 
 plt.imshow(trainim.image)
 plt.title('image')
-plt.show()
+#plt.show()
 
 # Plot background 
 #plt.imshow(trainim.label[:,:,11:14])
 plt.imshow(trainim.label.argmax(axis=2), cmap='hot')
 plt.title('label')
-plt.show()
+#plt.show()
 
 print('Image size {}'.format(trainim.image.shape))
 
 
-# In[79]:
-
-
+# In[3]:
 # Generate color training dataset
 from functools import reduce
 
@@ -137,23 +135,31 @@ label_mem = reduce(lambda a,b : a*b ,label_size, 1)
 total_train_mem = NUM_TRAIN * (image_mem + label_mem)
 print('Total size of the use of memory : {}MB'.format(total_train_mem/(1024*1024)))
 
+# Synthetic data generator
+def generateRectTrainData(X, y, num_samples):
+    trainim = TrainingImage(size=image_size)
+    for i in range(num_samples):
+        trainim.createImageBackground(TrainingImage.BLACK_CLASS)
+        trainim.addRandRectangle(color_class=random.randint(1, num_classes-1))
+
+        X[i] = trainim.image
+        y[i] = trainim.label
+    return X, y
+
 X_TRAIN_SIZE = (NUM_TRAIN,) + image_size
 Y_TRAIN_SIZE = (NUM_TRAIN,) + image_size[0:2] + (num_classes, )
 X_train = np.zeros(X_TRAIN_SIZE, dtype=np.uint8)
 y_train = np.zeros(Y_TRAIN_SIZE, dtype=np.uint8)
+X_train, y_train = generateRectTrainData(X_train, y_train, NUM_TRAIN)
 
-trainim = TrainingImage(size=image_size)
+NUM_VAL = 64
+X_VAL_SIZE = (NUM_VAL,) + image_size
+Y_VAL_SIZE = (NUM_VAL,) + image_size[0:2] + (num_classes, )
+X_val = np.zeros(X_VAL_SIZE, dtype=np.uint8)
+y_val = np.zeros(Y_VAL_SIZE, dtype=np.uint8)
+X_val, y_val = generateRectTrainData(X_val, y_val, NUM_VAL)
 
-for i in range(NUM_TRAIN):
-    trainim.createImageBackground(TrainingImage.BLACK_CLASS)
-    trainim.addRandRectangle(color_class=random.randint(1, num_classes-1))
-    
-    X_train[i] = trainim.image
-    y_train[i] = trainim.label
-
-
-
-# In[80]:
+# In[4]:
 
 
 # Plot color evaluation dataset
@@ -167,22 +173,10 @@ for idx in range(3,7):
     ax = fig.add_subplot(1,2,2)
     imsh = ax.imshow( y_train[idx,:,:,0], cmap='magma')
     plt.colorbar(imsh)
-    plt.show()
+    #plt.show()
 
-
-
-
-
-
-# 
-# 
 
 # In[ ]:
-
-
-
-
-
 # # Model
 # The original paper uses VGG for implementing the detector.
 # 
@@ -196,190 +190,38 @@ for idx in range(3,7):
 
 # Extract features from an arbitrary intermediate layer with VGG19
 
-from keras.applications.vgg16 import VGG16
-from keras.preprocessing import image
-from keras.applications.vgg16 import preprocess_input
-from keras.models import Model
-
-base_model = VGG16(weights='imagenet', input_shape=(224, 224, 3),pooling=None, include_top=False)
-
-
-print('Pre-trained model loaded.')
-
-for layer in base_model.layers:
-    layer.trainable = False
-
-base_model.summary()
-
-
-# In[6]:
-
-
-# Get input dimensions
-input_height = base_model.layers[0].input_shape[1]
-input_width = base_model.layers[0].input_shape[2]
-
-
-# In[148]:
-
+from segmodel import SegModel
 
 # Extract pooling layers out of VGG-16
 num_classes = len(TrainingImage.COLOR.keys())
 
-
-from keras.layers import Dense, Conv2D, UpSampling2D, Activation
-from keras.layers import Conv2DTranspose, Add, Flatten, Lambda
-from keras.layers import BatchNormalization, Reshape, Permute, Dropout
-from keras import backend as K
-from keras import regularizers
-
-
-
-def UpLayer(num_classes, activation_layer, layer):
-    simpleUpSample = True
-    if not simpleUpSample :
-        return Conv2DTranspose(num_classes, (3, 3), activation=activation_layer,
-                            padding='same', strides=(2,2)  )(layer)
-    else:
-        return UpSampling2D()(layer)
-
-activation_layer = 'elu'
-
-# Layer 5
-layer_5_1x1 = Conv2D(num_classes, 1, padding='same', name='convpool_5_1x1',
-               activation=activation_layer)(base_model.get_layer('block5_pool').output)
-
-up_layer_5 = UpLayer(num_classes, activation_layer, layer_5_1x1)
-
-#up_layer_5_bn = BatchNormalization(axis=3, name='up_layer_5_bn')(up_layer_5)
-
-# Layer 4
-layer_4_1x1 = Conv2D(num_classes, 1, padding='same', name='convpool_4_1x1',
-               activation=activation_layer)(base_model.get_layer('block4_pool').output)
-
-merge_4_and_5 = Add()([up_layer_5, layer_4_1x1])
-
-
-up_layer_4_and_5 = Conv2DTranspose(num_classes, (3, 3), activation=activation_layer,
-                            padding='same', strides=(2,2))(merge_4_and_5)
-
-up_layer_4_and_5 = BatchNormalization(axis=3, name='up_layer_4_and_5_bn')(up_layer_4_and_5)
-
-# Layer 3
-layer_3_1x1 = Conv2D(num_classes, 1, padding='same', name='convpool_3_1x1',
-               activation=activation_layer)(base_model.get_layer('block3_pool').output)
-
-merge_3_to_5 = Add()([up_layer_4_and_5, layer_3_1x1])
-
-up_layer_3_to_5 = UpLayer(num_classes, activation_layer, merge_3_to_5)
-
-
-
-# Layer 2
-layer_2_1x1 = Conv2D(num_classes, 1, padding='same', name='convpool_2_1x1',
-               activation=activation_layer)(base_model.get_layer('block2_pool').output)
-
-merge_2_to_5 = Add()([up_layer_3_to_5, layer_2_1x1])
-
-
-
-up_layer_2_to_5 =UpLayer(num_classes, activation_layer,merge_2_to_5)
-
-
-up_layer_2_to_5 = BatchNormalization(axis=3, 
-                                        name='up_layer_2_to_5_bn')(up_layer_2_to_5)
-
-# Layer 1
-layer_1_1x1 = Conv2D(num_classes, 1, padding='same', name='convpool_1_1x1',
-               activation=activation_layer)(base_model.get_layer('block1_pool').output)
-
-merge_1_to_5 = Add()([up_layer_2_to_5, layer_1_1x1])
-
-up_layer_1_to_5 =UpLayer(num_classes, activation_layer, merge_1_to_5)
-
-# Final layer
-final_1_1x1 = Conv2D(num_classes, 1, padding='same', name='conv_1_1x1',
-               activation=activation_layer)(base_model.get_layer('block1_conv1').output)
-
-final_merge = Add(name='final_merge')([final_1_1x1, up_layer_1_to_5])
-
-def depth_softmax(matrix):
-    """
-    The softmax activation function doesnt seeem to perform as well as the dice coeff.
-    See justification in https://arxiv.org/pdf/1707.04912.pdf
-    However, we keep using this layer for displaying the total accuracy of the
-    classifier during training and for displaying pixel-wise confidence during
-    inference.
-    """
-    sigmoid = lambda x: 1 / (1 + K.exp(-x))
-    sigmoided_matrix = sigmoid(matrix)
-    sum_sig = K.sum(sigmoided_matrix, axis=3)
-    sum_sig_reshaped = K.reshape(sum_sig,(-1,input_height,input_height,1))
-    repeat = num_classes
-    sum_sigmoided_repeated = K.repeat_elements(sum_sig_reshaped, repeat, axis=3)
-    softmax_matrix = sigmoided_matrix / sum_sigmoided_repeated
-    return softmax_matrix
-
-
-soft_out = Lambda(depth_softmax, name='soft_out')(final_merge)
-
-# https://github.com/jocicmarko/ultrasound-nerve-segmentation/blob/9d0fb65d67334dc332816bcb30d317c2de8b9137/train.py#L23
-
-def dice_coef(y_true, y_pred):
-    smooth = 1.0e-3
-    y_true_f = K.flatten(y_true)
-    y_pred_f = K.flatten(y_pred)
-    intersection = K.sum(y_true_f * y_pred_f)
-    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
-
-
-def dice_coef_loss(y_true, y_pred):
-    return - K.log(1 + dice_coef(y_true, y_pred))
-
-
-model = Model(inputs=base_model.input, outputs=[final_merge,soft_out])
-
-
-
-from keras.utils import plot_model
-plot_model(model, to_file='model.png')
-
-#for i in model.layers:
-#    print(i.trainable)
-
-model.summary()
-
-
-# In[169]:
-
+segModel = SegModel(num_classes) 
+model = segModel.getModel()
 
 from keras import optimizers
 optimizer_selected = optimizers.Adam(lr=1e-3)
 
 #model.compile(optimizer=optimizer_selected, loss='categorical_crossentropy')
-my_loss={'final_merge': dice_coef_loss, 'soft_out': 'categorical_crossentropy'}
+my_loss={'final_merge': segModel.dice_coef_loss, 'soft_out': 'categorical_crossentropy'}
 my_loss_weights={'final_merge': 1., 'soft_out': 0.1}
 model.compile(optimizer=optimizer_selected, loss=my_loss, loss_weights = my_loss_weights , 
-              metrics={'final_merge':dice_coef, 'soft_out':'categorical_accuracy'} )
-
-#class_weight = {TrainingImage.BLACK_CLASS: 1.0, TrainingImage.WHITE_CLASS: 3.0, TrainingImage.RED_CLASS: 3.0}
+              metrics={'final_merge':segModel.dice_coef, 'soft_out':'categorical_accuracy'} )
 
     
-history = model.fit(x=X_train, y=[y_train, y_train], batch_size=20, epochs=4, 
-                    validation_split=0.0, validation_data=None, shuffle=True,
-                    class_weight=None, sample_weight=None, initial_epoch=0,
+history = model.fit(x=X_train, y=[y_train, y_train], batch_size=20, epochs=10, 
+                    validation_split=0.0, validation_data=(X_val, [y_val, y_val]), shuffle=True,
                     steps_per_epoch=None, validation_steps=None)
 
 
-# In[176]:
+# In[ ]:
 
 
 import time
 # Plot loss function
-# plt.plot(history.epoch,history.history['loss'])
-# plt.legend(('loss'))
-# plt.grid('on')
-# plt.show()
+plt.plot(history.epoch,history.history['loss'])
+plt.legend(('loss'))
+plt.grid('on')
+#plt.show()
 
 #img = X_train[10]
 
@@ -426,7 +268,7 @@ plt.show()
 
 
 
-# In[174]:
+# In[ ]:
 
 
 
