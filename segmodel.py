@@ -5,16 +5,29 @@ from keras.layers import BatchNormalization, Reshape, Permute, Dropout
 from keras import backend as K
 from keras import regularizers
 from keras.models import Model
+from keras.layers.advanced_activations import LeakyReLU
+from keras.utils.generic_utils import get_custom_objects
+
+import numpy as np
+
+def activation_layer():
+    return LeakyReLU(alpha=1e-2)
+
+get_custom_objects().update({'activation_layer': Activation(activation_layer)})
+
 
 
 class SegModel:
     """ Segmentation class  """
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, class_weight=None):
+        if class_weight is not None:
+            self.class_weight = class_weight
+        else:
+            self.class_weight = np.ones(num_classes)
         self.num_classes = num_classes
-        self.activation_layer = 'selu'
         self.loadVGG16()
         self.buildHead()
-
+    
     def loadVGG16(self):
         """
         Load VGG 16 as stem model 
@@ -22,69 +35,69 @@ class SegModel:
         self.base_model = VGG16(weights='imagenet', input_shape=(224, 224, 3), 
          pooling=None, include_top=False)
         print('Pre-trained model loaded.')
-        for layer in self.base_model.layers:
-            layer.trainable = False
+        #for layer in self.base_model.layers:
+        #    layer.trainable = False
 
         # Get input dimensions
         self.input_height = self.base_model.layers[0].input_shape[1]
         self.input_width = self.base_model.layers[0].input_shape[2]
 
+
+    def UpLayer(self, layer):
+        simpleUpSample = True
+        if not simpleUpSample :
+            return Conv2DTranspose(self.num_classes, (3, 3), activation=self.activation_layer,
+                                padding='same', strides=(2,2)  )(layer)
+        else:
+            return UpSampling2D()(layer)
+        
+    def gen1x1Conv(self, layer_name):
+        """layer_name: str of the layer to extract from VGG"""
+        layer_i_1x1 = Conv2D(self.num_classes, 1, padding='same', 
+                             name='{}_1x1'.format(layer_name)) (self.base_model.get_layer(layer_name).output)
+        return activation_layer() (layer_i_1x1)
+
+    def gen1x1ConvUp(self, layer_name):
+        """layer_name: str of the layer to extract from VGG"""
+        conv_layer_i = self.gen1x1Conv(layer_name)
+        return self.UpLayer(conv_layer_i)
+
+    def gen1x1ConvUpMerge(self, layer_name, layer_to_merge):
+        """layer_name: str of the layer to extract from VGG
+        layer_to_merge: Keras layer"""
+        conv_layer_i = self.gen1x1Conv(layer_name)
+        merged = Add()([layer_to_merge, conv_layer_i])
+        up_layer = self.UpLayer(merged)
+        return activation_layer()(up_layer)
+        
+
     def buildHead(self):
         """ Build CNN head of the UNet """
         # Layer 5
-        layer_5_1x1 = Conv2D(self.num_classes, 1, padding='same', name='convpool_5_1x1',
-                    activation=self.activation_layer)(self.base_model.get_layer('block5_pool').output)
-
-        up_layer_5 = self.UpLayer(layer_5_1x1)
+        up_layer_5 = self.gen1x1ConvUp('block5_pool')
 
         # Layer 4
-        layer_4_1x1 = Conv2D(self.num_classes, 1, padding='same', name='convpool_4_1x1',
-                    activation=self.activation_layer)(self.base_model.get_layer('block4_pool').output)
-
-        merge_4_and_5 = Add()([up_layer_5, layer_4_1x1])
-
-
-        up_layer_4_and_5 = Conv2DTranspose(self.num_classes, (3, 3), activation=self.activation_layer,
-                                    padding='same', strides=(2,2))(merge_4_and_5)
-
+        up_layer_4_and_5 = self.gen1x1ConvUpMerge('block4_pool', up_layer_5)
         up_layer_4_and_5 = BatchNormalization(axis=3, name='up_layer_4_and_5_bn')(up_layer_4_and_5)
 
         # Layer 3
-        layer_3_1x1 = Conv2D(self.num_classes, 1, padding='same', name='convpool_3_1x1',
-                    activation=self.activation_layer)(self.base_model.get_layer('block3_pool').output)
-
-        merge_3_to_5 = Add()([up_layer_4_and_5, layer_3_1x1])
-
-        up_layer_3_to_5 = self.UpLayer(merge_3_to_5)
-
-
+        up_layer_3_to_5 = self.gen1x1ConvUpMerge('block3_pool', up_layer_4_and_5)
 
         # Layer 2
-        layer_2_1x1 = Conv2D(self.num_classes, 1, padding='same', name='convpool_2_1x1',
-                    activation=self.activation_layer)(self.base_model.get_layer('block2_pool').output)
-
-        merge_2_to_5 = Add()([up_layer_3_to_5, layer_2_1x1])
-
-
-
-        up_layer_2_to_5 = self.UpLayer(merge_2_to_5)
-
+        up_layer_2_to_5 = self.gen1x1ConvUpMerge('block2_pool', up_layer_3_to_5)
 
         up_layer_2_to_5 = BatchNormalization(axis=3, 
                                                 name='up_layer_2_to_5_bn')(up_layer_2_to_5)
 
         # Layer 1 UP
-        layer_1_1x1 = Conv2D(self.num_classes, 1, padding='same', name='convpool_1_1x1',
-                    activation=self.activation_layer)(self.base_model.get_layer('block1_pool').output)
-
-        merge_1_to_5 = Add()([up_layer_2_to_5, layer_1_1x1])
-
-        up_layer_1_to_5 = self.UpLayer(merge_1_to_5)
+        up_layer_1_to_5 = self.gen1x1ConvUpMerge('block1_pool', up_layer_2_to_5)
 
         # Final layer
-        final_1_1x1 = Conv2D(self.num_classes, 1, padding='same', name='conv_1_1x1',
-                    activation=self.activation_layer)(self.base_model.get_layer('block1_conv1').output)
-
+        final_1_1x1 = Conv2D(self.num_classes, 1, padding='same',
+                             name='conv_1_1x1')(self.base_model.get_layer('block1_conv1').output)
+        
+        final_1_1x1 =  activation_layer()(final_1_1x1)
+        
         final_merge = Add(name='final_merge')([final_1_1x1, up_layer_1_to_5])
 
         soft_out = Lambda(self.depth_softmax, name='soft_out')(final_merge)
@@ -107,40 +120,24 @@ class SegModel:
         inference.
         """
         sigmoid = lambda x: 1 / (1 + K.exp(-x))
-        sigmoided_matrix = sigmoid(matrix)
+        #sigmoided_matrix_in = sigmoid(matrix)
+        sigmoided_matrix_in = K.softplus(matrix)
+        weights_np = np.tile(self.class_weight, (self.input_height, self.input_width, 1) ) 
+        weights = K.constant(weights_np, dtype='float32')
+        print('weights.shape', weights.shape)
+        print('sigmoided_matrix_in.shape', sigmoided_matrix_in.shape)
+        sigmoided_matrix = sigmoided_matrix_in * weights
+        print('sigmoided_matrix.shape', sigmoided_matrix.shape)
         sum_sig = K.sum(sigmoided_matrix, axis=3)
-        sum_sig_reshaped = K.reshape(sum_sig,(-1, self.input_height, self.input_height,1))
+        print('sum_sig.shape', sum_sig.shape)
+        sum_sig_reshaped = K.reshape(sum_sig,(-1, self.input_height, self.input_width,1))
         repeat = self.num_classes
         sum_sigmoided_repeated = K.repeat_elements(sum_sig_reshaped, repeat, axis=3)
         softmax_matrix = sigmoided_matrix / sum_sigmoided_repeated
         return softmax_matrix
 
 
-
-    # https://github.com/jocicmarko/ultrasound-nerve-segmentation/blob/9d0fb65d67334dc332816bcb30d317c2de8b9137/train.py#L23
-
-    def dice_coef(self, y_true, y_pred):
-        smooth = 1.0e-3
-        y_true_f = K.flatten(y_true)
-        y_pred_f = K.flatten(y_pred)
-        intersection = K.sum(y_true_f * y_pred_f)
-        return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
-
-
-    def dice_coef_loss(self, y_true, y_pred):
-        return -1.0 * self.dice_coef(y_true, y_pred)
-
-
     def getModel(self):
         return self.model
-
-
-    def UpLayer(self, layer):
-        simpleUpSample = True
-        if not simpleUpSample :
-            return Conv2DTranspose(self.num_classes, (3, 3), activation=self.activation_layer,
-                                padding='same', strides=(2,2)  )(layer)
-        else:
-            return UpSampling2D()(layer)
 
 
